@@ -1,0 +1,16 @@
+{
+  "name": "slack-analytics-digest",
+  "version": "1.0.0",
+  "description": "Daily Slack briefing bot for analytics client channels",
+  "main": "scheduler.js",
+  "scripts": {
+    "start": "node scheduler.js",
+    "digest:now": "node digest.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.0",
+    "@slack/web-api": "^7.0.0",
+    "dotenv": "^16.0.0",
+    "node-cron": "^3.0.0"
+  }
+}
