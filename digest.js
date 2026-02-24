@@ -9,7 +9,6 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const DIGEST_CHANNEL = process.env.DIGEST_CHANNEL_ID;
 const LOOKBACK_HOURS = parseInt(process.env.LOOKBACK_HOURS || '24');
 
-// Channels defined by ID to bypass private channel listing limitations
 const CHANNELS = [
   { id: 'C09MJ34NK17', name: 'belle-tire-analytics' },
   { id: 'C039DS07LF5', name: 'bjs_analytics' },
@@ -59,14 +58,14 @@ async function summarizeWithClaude(channelName, messages) {
 
   const prompt = `You are an analytics consultant's daily briefing assistant. Below is a Slack conversation from the past 24 hours in a client channel called "${channelName}".
 
-Analyze the conversation and produce a structured briefing with these four sections:
+Analyze the conversation and return a JSON object with exactly these four fields:
+- "summary": 2-3 sentence overview of what was discussed
+- "tasks": array of strings, each an open task or action item (include owner in parens if mentioned, e.g. "Fix data mapping (Kevin)")
+- "decisions": array of strings, each a key decision or resolved item
+- "questions": array of strings, each a question directed at Kevin or left unanswered
 
-1. **📋 General Summary** — 2-3 sentence overview of what was discussed
-2. **✅ Open Tasks / Action Items** — Bullet list of things that need to be done (include owner if mentioned)
-3. **🔑 Key Decisions Made** — Any decisions, conclusions, or resolved items
-4. **❓ Questions Needing My Response** — Anything directed at Kevin or unanswered questions that need attention
-
-Be concise and actionable. If a section has nothing relevant, write "None in this period."
+If a section has nothing relevant, return an empty array [] for that field.
+Return ONLY valid JSON, no markdown, no explanation.
 
 CLIENT: ${clientName}
 ---
@@ -78,13 +77,85 @@ ${transcript}`;
     messages: [{ role: 'user', content: prompt }],
   });
 
+  let parsed;
+  try {
+    const raw = response.content[0].text.replace(/```json|```/g, "").trim();
+    parsed = JSON.parse(raw);
+  } catch {
+    // fallback if JSON parsing fails
+    parsed = {
+      summary: response.content[0].text.replace(/```json|```/g, "").trim(),
+      tasks: [],
+      decisions: [],
+      questions: [],
+    };
+  }
+
   return {
     channelName,
     clientName,
-    summary: response.content[0].text,
+    data: parsed,
     messageCount: messages.length,
     isEmpty: false,
   };
+}
+
+function buildChannelBlocks(result) {
+  const { channelName, clientName, data, messageCount } = result;
+  const blocks = [];
+
+  // Channel header
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: `*📊 ${clientName}* · <#${CHANNELS.find(c => c.name === channelName)?.id}> · _${messageCount} message${messageCount !== 1 ? 's' : ''}_`,
+    },
+  });
+
+  // Summary
+  if (data.summary) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: data.summary },
+    });
+  }
+
+  // Tasks
+  if (data.tasks?.length > 0) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*✅ Action Items*\n${data.tasks.map(t => `• ${t}`).join('\n')}`,
+      },
+    });
+  }
+
+  // Decisions
+  if (data.decisions?.length > 0) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*🔑 Decisions Made*\n${data.decisions.map(d => `• ${d}`).join('\n')}`,
+      },
+    });
+  }
+
+  // Questions needing response
+  if (data.questions?.length > 0) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*❓ Needs Your Response*\n${data.questions.map(q => `• ${q}`).join('\n')}`,
+      },
+    });
+  }
+
+  blocks.push({ type: 'divider' });
+  return blocks;
 }
 
 async function postDigestToSlack(results) {
@@ -98,27 +169,20 @@ async function postDigestToSlack(results) {
   const blocks = [
     {
       type: 'header',
-      text: { type: 'plain_text', text: `📊 Daily Analytics Briefing — ${today}` },
+      text: { type: 'plain_text', text: `📋 Daily Analytics Briefing — ${today}`, emoji: true },
     },
     {
       type: 'context',
       elements: [{
         type: 'mrkdwn',
-        text: `${activeResults.length} active client channel${activeResults.length !== 1 ? 's' : ''} • Last 24 hours`,
+        text: `${activeResults.length} active client${activeResults.length !== 1 ? 's' : ''} • Last ${LOOKBACK_HOURS} hours`,
       }],
     },
     { type: 'divider' },
   ];
 
   for (const result of activeResults) {
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*#${result.channelName}* _(${result.messageCount} messages)_\n\n${result.summary}`,
-      },
-    });
-    blocks.push({ type: 'divider' });
+    blocks.push(...buildChannelBlocks(result));
   }
 
   if (emptyChannels.length > 0) {
@@ -126,7 +190,7 @@ async function postDigestToSlack(results) {
       type: 'context',
       elements: [{
         type: 'mrkdwn',
-        text: `💤 No activity in: ${emptyChannels.join(', ')}`,
+        text: `💤 No activity: ${emptyChannels.join(', ')}`,
       }],
     });
   }
